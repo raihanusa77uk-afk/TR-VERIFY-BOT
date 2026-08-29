@@ -60,9 +60,9 @@ def init_db():
     ''')
     
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS trader_ids (
+        CREATE TABLE IF NOT EXISTS used_trader_ids (
             trader_id TEXT PRIMARY KEY,
-            used_by_user_id INTEGER
+            user_id INTEGER
         )
     ''')
     
@@ -100,17 +100,26 @@ def update_user_status(user_id, trader_id, status):
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET trader_id = ?, status = ? WHERE user_id = ?", (trader_id, status, user_id))
     if status == 'APPROVED':
-        cursor.execute("INSERT OR REPLACE INTO trader_ids (trader_id, used_by_user_id) VALUES (?, ?)", (trader_id, user_id))
+        cursor.execute("INSERT OR REPLACE INTO used_trader_ids (trader_id, user_id) VALUES (?, ?)", (trader_id, user_id))
     conn.commit()
     conn.close()
 
-def is_trader_id_used(trader_id):
+# Trader ID ইতিমধ্যে ব্যবহার করা হয়েছে কিনা তা ডাটাবেসে চেক করা
+def is_trader_id_already_used(trader_id):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT used_by_user_id FROM trader_ids WHERE trader_id = ?", (trader_id,))
+    # Check in approved trader ids table
+    cursor.execute("SELECT user_id FROM used_trader_ids WHERE trader_id = ?", (trader_id,))
     row = cursor.fetchone()
+    if row:
+        conn.close()
+        return True
+    
+    # Check in active pending/approved users
+    cursor.execute("SELECT user_id FROM users WHERE trader_id = ? AND status IN ('APPROVED', 'PENDING')", (trader_id,))
+    row_user = cursor.fetchone()
     conn.close()
-    return row is not None
+    return row_user is not None
 
 def get_db_stats():
     conn = sqlite3.connect(DATABASE_NAME)
@@ -237,8 +246,14 @@ async def get_trader_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ অকার্যকর ID! একটি সঠিক ৮-ডিজিটের Quotex Trader ID টাইপ করুন (যেমন: 90177664):")
         return WAITING_FOR_ID
 
-    if is_trader_id_used(text):
-        await update.message.reply_text("⚠️ **Trader ID Already Registered!** এই আইডিটি দিয়ে পূর্বে VIP এক্সেস নেওয়া হয়ে গেছে।")
+    # 🛑 1 ID 1 TIME CHECK 🛑
+    if is_trader_id_already_used(text):
+        await update.message.reply_text(
+            f"⚠️ **Trader ID Already Used!**\n\n"
+            f"এই Trader ID (`{text}`) টি দিয়ে ইতিমধ্যে অন্য একজন VIP অ্যাক্সেস নিয়েছেন বা ভেরিফিকেশনের জন্য পাঠিয়েছেন।\n"
+            f"অনুগ্রহ করে আপনার নিজস্ব সঠিক Trader ID টি টাইপ করুন:",
+            parse_mode="Markdown"
+        )
         return WAITING_FOR_ID
 
     context.user_data['trader_id'] = text
@@ -248,6 +263,12 @@ async def get_trader_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     trader_id = context.user_data.get('trader_id')
+    
+    # আরেকবার চেক (সুরক্ষার জন্য)
+    if is_trader_id_already_used(trader_id):
+        await update.message.reply_text("❌ দুঃখিত! এই Trader ID টি ইতিমধ্যে ব্যবহার হয়ে গেছে। প্রক্রিয়াটি আবার শুরু করুন।", reply_markup=get_main_menu_keyboard())
+        return ConversationHandler.END
+
     photo_file_id = update.message.photo[-1].file_id
 
     keyboard = [
@@ -394,7 +415,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------- Execution -----------------
 def main():
-    # Start Dummy Web Server in background for Render Port Detection
     threading.Thread(target=run_dummy_server, daemon=True).start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
