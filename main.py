@@ -1,5 +1,8 @@
 import logging
 import sqlite3
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
@@ -20,12 +23,24 @@ ADMIN_ID = 7047896730
 VIP_GROUP_ID = -1004424341978
 
 REFERRAL_LINK = "https://broker-qx.pro/sign-up/?lid=2321846"
-MUST_JOIN_CHANNEL = "@tradingwithraihan_22"          # আপডেট করা পাবলিক চ্যানেল ইউজারনেম
-SUPPORT_USERNAME = "@TR_Support_and_Feedback"        # আপডেট করা সাপোর্ট ইউজারনেম
+MUST_JOIN_CHANNEL = "@tradingwithraihan_22"
+SUPPORT_USERNAME = "@TR_Support_and_Feedback"
 DATABASE_NAME = "master_vip_bot.db"
 # ====================================================================
 
 WAITING_FOR_ID, WAITING_FOR_SCREENSHOT = range(2)
+
+# Dummy HTTP Web Server for Render Port Check
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"VIP Bot is Running Alive!")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    server.serve_forever()
 
 # ----------------- Database Setup -----------------
 def init_db():
@@ -379,6 +394,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------- Execution -----------------
 def main():
+    # Start Dummy Web Server in background for Render Port Detection
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
