@@ -81,6 +81,10 @@ def save_user(user_id, username, full_name):
     conn.close()
 
 def is_user_blocked(user_id):
+    # Admin ক্যান নেভার বি ব্লকড
+    if user_id == ADMIN_ID:
+        return False
+        
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT is_blocked FROM users WHERE user_id = ?", (user_id,))
@@ -89,6 +93,8 @@ def is_user_blocked(user_id):
     return row[0] == 1 if row else False
 
 def set_block_status(user_id, status_code):
+    if user_id == ADMIN_ID:
+        return
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET is_blocked = ? WHERE user_id = ?", (status_code, user_id))
@@ -104,18 +110,15 @@ def update_user_status(user_id, trader_id, status):
     conn.commit()
     conn.close()
 
-# Trader ID ইতিমধ্যে ব্যবহার করা হয়েছে কিনা তা ডাটাবেসে চেক করা
 def is_trader_id_already_used(trader_id):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    # Check in approved trader ids table
     cursor.execute("SELECT user_id FROM used_trader_ids WHERE trader_id = ?", (trader_id,))
     row = cursor.fetchone()
     if row:
         conn.close()
         return True
     
-    # Check in active pending/approved users
     cursor.execute("SELECT user_id FROM users WHERE trader_id = ? AND status IN ('APPROVED', 'PENDING')", (trader_id,))
     row_user = cursor.fetchone()
     conn.close()
@@ -163,6 +166,10 @@ def get_main_menu_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
+    # অটো আনব্লক করার সুরক্ষা (এডমিনের জন্য)
+    if user.id == ADMIN_ID:
+        set_block_status(user.id, 0)
+
     if is_user_blocked(user.id):
         await update.message.reply_text("🚫 আপনি এই বটটি ব্যবহার করা থেকে সাময়িকভাবে নিষিদ্ধ (Blocked)।")
         return
@@ -246,7 +253,6 @@ async def get_trader_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ অকার্যকর ID! একটি সঠিক ৮-ডিজিটের Quotex Trader ID টাইপ করুন (যেমন: 90177664):")
         return WAITING_FOR_ID
 
-    # 🛑 1 ID 1 TIME CHECK 🛑
     if is_trader_id_already_used(text):
         await update.message.reply_text(
             f"⚠️ **Trader ID Already Used!**\n\n"
@@ -264,7 +270,6 @@ async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     trader_id = context.user_data.get('trader_id')
     
-    # আরেকবার চেক (সুরক্ষার জন্য)
     if is_trader_id_already_used(trader_id):
         await update.message.reply_text("❌ দুঃখিত! এই Trader ID টি ইতিমধ্যে ব্যবহার হয়ে গেছে। প্রক্রিয়াটি আবার শুরু করুন।", reply_markup=get_main_menu_keyboard())
         return ConversationHandler.END
