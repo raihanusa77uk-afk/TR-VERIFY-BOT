@@ -17,7 +17,7 @@ from telegram.ext import (
 # Logging Setup
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# ================= Configuration (100% Configured) =================
+# ================= Configuration =================
 BOT_TOKEN = "8295039946:AAFgJ9yLjbLV69EN5HRjOW17_kmaYr8c82w"
 ADMIN_ID = 7047896730
 VIP_GROUP_ID = -1004424341978
@@ -26,23 +26,23 @@ REFERRAL_LINK = "https://broker-qx.pro/sign-up/?lid=2321846"
 MUST_JOIN_CHANNEL = "@tradingwithraihan_22"
 SUPPORT_USERNAME = "@TR_Support_and_Feedback"
 DATABASE_NAME = "master_vip_bot.db"
-# ====================================================================
+# =================================================
 
 WAITING_FOR_ID, WAITING_FOR_SCREENSHOT = range(2)
 
-# Dummy HTTP Web Server for Render Port Check
+# Dummy HTTP Web Server for Render
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"VIP Bot is Running Alive!")
+        self.wfile.write(b"VIP Bot Status: OK")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
     server.serve_forever()
 
-# ----------------- Database Setup -----------------
+# Database Setup
 def init_db():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
@@ -81,10 +81,8 @@ def save_user(user_id, username, full_name):
     conn.close()
 
 def is_user_blocked(user_id):
-    # Admin ক্যান নেভার বি ব্লকড
     if user_id == ADMIN_ID:
         return False
-        
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT is_blocked FROM users WHERE user_id = ?", (user_id,))
@@ -146,7 +144,7 @@ def get_all_users():
     conn.close()
     return [row[0] for row in rows]
 
-# ----------------- Force Channel Join Checker -----------------
+# Channel Checker
 async def check_channel_membership(user_id, context: ContextTypes.DEFAULT_TYPE):
     try:
         member = await context.bot.get_chat_member(chat_id=MUST_JOIN_CHANNEL, user_id=user_id)
@@ -162,21 +160,19 @@ def get_main_menu_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# ----------------- User Commands -----------------
+# ----------------- Handlers -----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
-    # অটো আনব্লক করার সুরক্ষা (এডমিনের জন্য)
     if user.id == ADMIN_ID:
         set_block_status(user.id, 0)
 
     if is_user_blocked(user.id):
         await update.message.reply_text("🚫 আপনি এই বটটি ব্যবহার করা থেকে সাময়িকভাবে নিষিদ্ধ (Blocked)।")
-        return
+        return ConversationHandler.END
 
     save_user(user.id, user.username, user.full_name)
     
-    # Force Join Check
     is_member = await check_channel_membership(user.id, context)
     if not is_member:
         join_btn = InlineKeyboardMarkup([[InlineKeyboardButton("📢 Join Public Channel", url=f"https://t.me/tradingwithraihan_22")]])
@@ -185,7 +181,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"নিচের বাটনে ক্লিক করে {MUST_JOIN_CHANNEL} জয়েন করুন এবং পুনরায় `/start` টাইপ করুন।",
             reply_markup=join_btn, parse_mode="Markdown"
         )
-        return
+        return ConversationHandler.END
 
     welcome_msg = (
         f"👋 **হ্যালো {user.first_name}!**\n\n"
@@ -193,61 +189,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"প্রতিদিনের হাই-একুরেসি সিগন্যাল ও গাইড পেতে নিচের বাটন ব্যবহার করুন।"
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown", reply_markup=get_main_menu_keyboard())
+    return ConversationHandler.END
 
-# Handle Menu Items
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_vip_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    
     if is_user_blocked(user.id):
-        return
+        return ConversationHandler.END
 
-    text = update.message.text.strip()
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM users WHERE user_id = ?", (user.id,))
+    row = cursor.fetchone()
+    conn.close()
 
-    if text == "🚀 Join VIP Group":
-        conn = sqlite3.connect(DATABASE_NAME)
-        cursor = conn.cursor()
-        cursor.execute("SELECT status FROM users WHERE user_id = ?", (user.id,))
-        row = cursor.fetchone()
-        conn.close()
+    if row and row[0] == 'APPROVED':
+        await update.message.reply_text(f"🎉 আপনি ইতিমধ্যে VIP গ্রুপের মেম্বার! নতুন লিংকের জন্য সাপোর্ট অ্যাডমিনের সাথে যোগাযোগ করুন: {SUPPORT_USERNAME}")
+        return ConversationHandler.END
 
-        if row and row[0] == 'APPROVED':
-            await update.message.reply_text(f"🎉 আপনি ইতিমধ্যে VIP গ্রুপের মেম্বার! নতুন লিংকের জন্য সাপোর্ট অ্যাডমিনের সাথে যোগাযোগ করুন: {SUPPORT_USERNAME}")
-            return ConversationHandler.END
-
-        msg = (
-            f"🎯 **VIP গ্রুপে যুক্ত হওয়ার সহজ ধাপসমূহ:**\n\n"
-            f"1️⃣ প্রথমে আমাদের অফিশিয়াল রেজিস্ট্রেশন লিঙ্ক দিয়ে অ্যাকাউন্ট খুলুন:\n👉 {REFERRAL_LINK}\n\n"
-            f"2️⃣ অ্যাকাউন্টে সর্বনিম্ন **$50** ডিপোজিট করুন।\n\n"
-            f"3️⃣ এবার আপনার **8-digit Quotex Trader ID** লিখে পাঠান:"
-        )
-        await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
-        return WAITING_FOR_ID
-
-    elif text == "🔗 Registration Link":
-        reg_msg = f"📌 **Quotex Official Sign-Up Link:**\n\n👉 {REFERRAL_LINK}\n\n⚠️ *অবশ্যই এই লিংকের মাধ্যমে একাউন্ট খুলতে হবে।*"
-        await update.message.reply_text(reg_msg, parse_mode="Markdown", disable_web_page_preview=True)
-
-    elif text == "📖 VIP Signal Rules":
-        rules_msg = (
-            f"📊 **VIP Trading Rules:**\n\n"
-            f"1️⃣ **Money Management:** প্রতি ট্রেডে ক্যাপিটালের ২%-৩% ব্যবহার করবেন।\n"
-            f"2️⃣ **Martingale:** সর্বোচ্চ ১ স্টেপ MTG ফলো করবেন।\n"
-            f"3️⃣ **Target:** দৈনিক প্রফিট টার্গেট পূরণ হলে ট্রেডিং অফ রাখুন।"
-        )
-        await update.message.reply_text(rules_msg, parse_mode="Markdown")
-
-    elif text == "📞 Help & Support":
-        support_msg = f"💬 **Customer Support:**\n\nযেকোনো প্রয়োজনে সরাসরি কথা বলুন:\n👨‍💻 Support: {SUPPORT_USERNAME}"
-        await update.message.reply_text(support_msg, parse_mode="Markdown")
-
-    else:
-        await update.message.reply_text("অনুগ্রহ করে নিচের বাটন ব্যবহার করুন।", reply_markup=get_main_menu_keyboard())
+    msg = (
+        f"🎯 **VIP গ্রুপে যুক্ত হওয়ার সহজ ধাপসমূহ:**\n\n"
+        f"1️⃣ প্রথমে আমাদের অফিশিয়াল রেজিস্ট্রেশন লিঙ্ক দিয়ে অ্যাকাউন্ট খুলুন:\n👉 {REFERRAL_LINK}\n\n"
+        f"2️⃣ অ্যাকাউন্টে সর্বনিম্ন **$50** ডিপোজিট করুন।\n\n"
+        f"3️⃣ এবার আপনার **8-digit Quotex Trader ID** লিখে পাঠান:"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+    return WAITING_FOR_ID
 
 async def get_trader_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-
-    if text in ["🚀 Join VIP Group", "🔗 Registration Link", "📖 VIP Signal Rules", "📞 Help & Support"]:
-        return await handle_message(update, context)
 
     if not text.isdigit() or len(text) != 8:
         await update.message.reply_text("❌ অকার্যকর ID! একটি সঠিক ৮-ডিজিটের Quotex Trader ID টাইপ করুন (যেমন: 90177664):")
@@ -263,7 +232,7 @@ async def get_trader_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_ID
 
     context.user_data['trader_id'] = text
-    await update.message.reply_text("✅ ID পাওয়া গেছে। এবার ডিপোজিটের (Min $50) একটি **Screenshot (ছবি)** পাঠান:")
+    await update.message.reply_text("✅ ID পাওয়া গেছে। এবার আপনার ডিপোজিটের (Min $50) একটি **Screenshot (ছবি)** পাঠান:")
     return WAITING_FOR_SCREENSHOT
 
 async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -285,20 +254,25 @@ async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    username_str = f"@{user.username}" if user.username else "No Username"
     caption = (
         f"📩 **New Verification Request**\n\n"
-        f"👤 **User:** {user.full_name} (@{user.username})\n"
+        f"👤 **User:** {user.full_name} ({username_str})\n"
         f"🆔 **Telegram ID:** `{user.id}`\n"
         f"🔢 **Trader ID:** `{trader_id}`"
     )
     
-    await context.bot.send_photo(
-        chat_id=ADMIN_ID,
-        photo=photo_file_id,
-        caption=caption,
-        parse_mode="Markdown",
-        reply_markup=reply_markup
-    )
+    # Send Notification to Admin
+    try:
+        await context.bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=photo_file_id,
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        logging.error(f"Failed to send request to admin: {e}")
 
     await update.message.reply_text(
         "✅ আপনার ভেরিফিকেশন আবেদন অ্যাডমিনের কাছে জমা হয়েছে। যাচাইকরণের পর আপনাকে লিঙ্ক জানিয়ে দেওয়া হবে।",
@@ -306,7 +280,35 @@ async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# ----------------- Admin Callback Handler -----------------
+# General Message Handler
+async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if is_user_blocked(user.id):
+        return
+
+    text = update.message.text.strip()
+
+    if text == "🔗 Registration Link":
+        reg_msg = f"📌 **Quotex Official Sign-Up Link:**\n\n👉 {REFERRAL_LINK}\n\n⚠️ *অবশ্যই এই লিংকের মাধ্যমে একাউন্ট খুলতে হবে।*"
+        await update.message.reply_text(reg_msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+    elif text == "📖 VIP Signal Rules":
+        rules_msg = (
+            f"📊 **VIP Trading Rules:**\n\n"
+            f"1️⃣ **Money Management:** প্রতি ট্রেডে ক্যাপিটালের ২%-৩% ব্যবহার করবেন।\n"
+            f"2️⃣ **Martingale:** সর্বোচ্চ ১ স্টেপ MTG ফলো করবেন।\n"
+            f"3️⃣ **Target:** দৈনিক প্রফিট টার্গেট পূরণ হলে ট্রেডিং অফ রাখুন।"
+        )
+        await update.message.reply_text(rules_msg, parse_mode="Markdown")
+
+    elif text == "📞 Help & Support":
+        support_msg = f"💬 **Customer Support:**\n\nযেকোনো প্রয়োজনে সরাসরি কথা বলুন:\n👨‍💻 Support: {SUPPORT_USERNAME}"
+        await update.message.reply_text(support_msg, parse_mode="Markdown")
+
+    else:
+        await update.message.reply_text("অনুগ্রহ করে নিচের বাটন ব্যবহার করুন।", reply_markup=get_main_menu_keyboard())
+
+# Admin Decisions
 async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -352,7 +354,6 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_block_status(user_id, 1)
         await query.edit_message_caption(caption=query.message.caption + "\n\nSTATUS: 🚫 **USER BLOCKED**")
 
-# ----------------- Advanced Admin Tools -----------------
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -424,13 +425,17 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🚀 Join VIP Group$"), handle_message)],
+    vip_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^🚀 Join VIP Group$"), start_vip_join)],
         states={
             WAITING_FOR_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_trader_id)],
             WAITING_FOR_SCREENSHOT: [MessageHandler(filters.PHOTO, get_screenshot)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[
+            CommandHandler('cancel', cancel),
+            MessageHandler(filters.Regex("^🚀 Join VIP Group$"), start_vip_join)
+        ],
+        allow_reentry=True
     )
 
     app.add_handler(CommandHandler('start', start))
@@ -439,8 +444,9 @@ def main():
     app.add_handler(CommandHandler('block', block_user_cmd))
     app.add_handler(CommandHandler('unblock', unblock_user_cmd))
     app.add_handler(CommandHandler('broadcast', broadcast))
-    app.add_handler(conv_handler)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    app.add_handler(vip_conv)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_general_message))
     app.add_handler(CallbackQueryHandler(admin_decision))
 
     print("Master VIP Bot Status: ONLINE and Ready!")
