@@ -2,6 +2,7 @@ import logging
 import sqlite3
 import os
 import threading
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -28,9 +29,8 @@ SUPPORT_USERNAME = "@TR_Support_and_Feedback"
 DATABASE_NAME = "master_vip_bot.db"
 # =================================================
 
-WAITING_FOR_ID, WAITING_FOR_SCREENSHOT = range(2)
+WAITING_FOR_ID, WAITING_FOR_DEPOSIT, WAITING_FOR_SCREENSHOT, WAITING_FOR_FEEDBACK = range(4)
 
-# Dummy HTTP Web Server for Render
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -53,8 +53,10 @@ def init_db():
             username TEXT,
             full_name TEXT,
             trader_id TEXT,
+            deposit_amount REAL DEFAULT 0,
             status TEXT DEFAULT 'PENDING',
             is_blocked INTEGER DEFAULT 0,
+            last_active_date TEXT,
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -75,8 +77,17 @@ init_db()
 def save_user(user_id, username, full_name):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?, ?, ?)", 
-                   (user_id, username, full_name))
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, username, full_name, last_active_date) VALUES (?, ?, ?, ?)", 
+                   (user_id, username, full_name, today_str))
+    conn.commit()
+    conn.close()
+
+def update_activity(user_id):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    cursor.execute("UPDATE users SET last_active_date = ? WHERE user_id = ?", (today_str, user_id))
     conn.commit()
     conn.close()
 
@@ -99,10 +110,12 @@ def set_block_status(user_id, status_code):
     conn.commit()
     conn.close()
 
-def update_user_status(user_id, trader_id, status):
+def update_user_status(user_id, trader_id, status, deposit_amount=0):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET trader_id = ?, status = ? WHERE user_id = ?", (trader_id, status, user_id))
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    cursor.execute("UPDATE users SET trader_id = ?, status = ?, deposit_amount = ?, last_active_date = ? WHERE user_id = ?", 
+                   (trader_id, status, deposit_amount, today_str, user_id))
     if status == 'APPROVED':
         cursor.execute("INSERT OR REPLACE INTO used_trader_ids (trader_id, user_id) VALUES (?, ?)", (trader_id, user_id))
     conn.commit()
@@ -144,7 +157,6 @@ def get_all_users():
     conn.close()
     return [row[0] for row in rows]
 
-# Channel Checker
 async def check_channel_membership(user_id, context: ContextTypes.DEFAULT_TYPE):
     try:
         member = await context.bot.get_chat_member(chat_id=MUST_JOIN_CHANNEL, user_id=user_id)
@@ -152,10 +164,11 @@ async def check_channel_membership(user_id, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         return False
 
-# Keyboards
 def get_main_menu_keyboard():
     keyboard = [
         [KeyboardButton("🚀 Join VIP Group"), KeyboardButton("🔗 Registration Link")],
+        [KeyboardButton("📝 Log Today's Trade"), KeyboardButton("📊 My Account / Status")],
+        [KeyboardButton("📚 Trading Course"), KeyboardButton("💬 Send Profit Feedback")],
         [KeyboardButton("📖 VIP Signal Rules"), KeyboardButton("📞 Help & Support")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -172,6 +185,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     save_user(user.id, user.username, user.full_name)
+    update_activity(user.id)
     
     is_member = await check_channel_membership(user.id, context)
     if not is_member:
@@ -186,7 +200,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_msg = (
         f"👋 **হ্যালো {user.first_name}!**\n\n"
         f"আমাদের **Exclusive VIP Trading Bot**-এ আপনাকে স্বাগতম! 📈\n\n"
-        f"প্রতিদিনের হাই-একুরেসি সিগন্যাল ও গাইড পেতে নিচের বাটন ব্যবহার করুন।"
+        f"নিয়মিত ট্রেড আপডেট দিন এবং অ্যাক্টিভ থেকে আপনার VIP মেম্বারশিপ বজায় রাখুন।"
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
@@ -195,6 +209,8 @@ async def start_vip_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_user_blocked(user.id):
         return ConversationHandler.END
+
+    update_activity(user.id)
 
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
@@ -232,12 +248,24 @@ async def get_trader_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_ID
 
     context.user_data['trader_id'] = text
-    await update.message.reply_text("✅ ID পাওয়া গেছে। এবার আপনার ডিপোজিটের (Min $50) একটি **Screenshot (ছবি)** পাঠান:")
+    await update.message.reply_text("💵 এবার আপনি কত ডলার Deposit করেছেন তা সংখ্যায় লিখুন (যেমন: 50, 100):")
+    return WAITING_FOR_DEPOSIT
+
+async def get_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    
+    if not text.isdigit() or int(text) < 50:
+        await update.message.reply_text("❌ সর্বনিম্ন ডিপোজিট $50 হতে হবে। অনুগ্রহ করে সঠিক অ্যামাউন্ট লিখুন (যেমন: 50):")
+        return WAITING_FOR_DEPOSIT
+
+    context.user_data['deposit_amount'] = float(text)
+    await update.message.reply_text("✅ ডিপোজিট পরিমাণ সংরক্ষিত। এবার আপনার ডিপোজিটের একটি **Screenshot (ছবি)** পাঠান:")
     return WAITING_FOR_SCREENSHOT
 
 async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     trader_id = context.user_data.get('trader_id')
+    deposit_amount = context.user_data.get('deposit_amount', 0)
     
     if is_trader_id_already_used(trader_id):
         await update.message.reply_text("❌ দুঃখিত! এই Trader ID টি ইতিমধ্যে ব্যবহার হয়ে গেছে। প্রক্রিয়াটি আবার শুরু করুন।", reply_markup=get_main_menu_keyboard())
@@ -247,7 +275,7 @@ async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [
         [
-            InlineKeyboardButton("✅ Approve", callback_data=f"app_{user.id}_{trader_id}"),
+            InlineKeyboardButton("✅ Approve", callback_data=f"app_{user.id}_{trader_id}_{deposit_amount}"),
             InlineKeyboardButton("❌ Reject", callback_data=f"rej_{user.id}_{trader_id}")
         ],
         [InlineKeyboardButton("🚫 Block User", callback_data=f"blk_{user.id}_{trader_id}")]
@@ -259,10 +287,10 @@ async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📩 **New Verification Request**\n\n"
         f"👤 **User:** {user.full_name} ({username_str})\n"
         f"🆔 **Telegram ID:** `{user.id}`\n"
-        f"🔢 **Trader ID:** `{trader_id}`"
+        f"🔢 **Trader ID:** `{trader_id}`\n"
+        f"💰 **Deposit:** `${deposit_amount}`"
     )
     
-    # Send Notification to Admin
     try:
         await context.bot.send_photo(
             chat_id=ADMIN_ID,
@@ -273,6 +301,8 @@ async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logging.error(f"Failed to send request to admin: {e}")
+
+    update_user_status(user.id, trader_id, 'PENDING', deposit_amount)
 
     await update.message.reply_text(
         "✅ আপনার ভেরিফিকেশন আবেদন অ্যাডমিনের কাছে জমা হয়েছে। যাচাইকরণের পর আপনাকে লিঙ্ক জানিয়ে দেওয়া হবে।",
@@ -286,11 +316,48 @@ async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_T
     if is_user_blocked(user.id):
         return
 
+    update_activity(user.id)
     text = update.message.text.strip()
 
     if text == "🔗 Registration Link":
         reg_msg = f"📌 **Quotex Official Sign-Up Link:**\n\n👉 {REFERRAL_LINK}\n\n⚠️ *অবশ্যই এই লিংকের মাধ্যমে একাউন্ট খুলতে হবে।*"
         await update.message.reply_text(reg_msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+    elif text == "📝 Log Today's Trade":
+        await update.message.reply_text("✅ আপনার আজকের ট্রেড অ্যাক্টিভিটি সফলভাবে রেজিস্টার করা হয়েছে! নিয়মিত ট্রেড করে আপনার VIP এক্সেস অ্যাক্টিভ রাখুন।")
+
+    elif text == "📊 My Account / Status":
+        conn = sqlite3.connect(DATABASE_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT trader_id, deposit_amount, status, last_active_date FROM users WHERE user_id = ?", (user.id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row and row[0]:
+            status_text = (
+                f"👤 **Your Account Profile:**\n\n"
+                f"🔢 **Trader ID:** `{row[0]}`\n"
+                f"💵 **Deposit:** `${row[1]}`\n"
+                f"📌 **VIP Status:** `{row[2]}`\n"
+                f"📅 **Last Active Date:** `{row[3]}`"
+            )
+        else:
+            status_text = "❌ আপনার কোনো সক্রিয় ভেরিফিকেশন রেকর্ড পাওয়া যায়নি। VIP গ্ৰুপে যুক্ত হতে '🚀 Join VIP Group' বাটন চাপুন।"
+        
+        await update.message.reply_text(status_text, parse_mode="Markdown")
+
+    elif text == "📚 Trading Course":
+        course_msg = (
+            f"🎓 **Free Trading Educational Materials:**\n\n"
+            f"1️⃣ **Candlestick Basics:** মার্কেট ট্রেন্ড চেনার মূল নিয়মাবলি।\n"
+            f"2️⃣ **Support & Resistance Strategy:** সঠিক এন্ট্রি পয়েন্ট নির্বাচন।\n"
+            f"3️⃣ **Risk Management Plan:** মূলধন সুরক্ষার টিপস।\n\n"
+            f"বুক বা কোর্সের জন্য যোগাযোগ করুন: {SUPPORT_USERNAME}"
+        )
+        await update.message.reply_text(course_msg, parse_mode="Markdown")
+
+    elif text == "💬 Send Profit Feedback":
+        await update.message.reply_text("📸 আপনার আজকের প্রফিটের স্ক্রিনশট সরাসরি আমাদের এডমিন সাপোর্টে পাঠান: " + SUPPORT_USERNAME)
 
     elif text == "📖 VIP Signal Rules":
         rules_msg = (
@@ -317,6 +384,7 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = data[0]
     user_id = int(data[1])
     trader_id = data[2]
+    deposit_amount = float(data[3]) if len(data) > 3 else 0.0
 
     if action == "app":
         try:
@@ -326,7 +394,7 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name=f"VIP Access for {user_id}"
             )
             single_use_link = invite_link_object.invite_link
-            update_user_status(user_id, trader_id, 'APPROVED')
+            update_user_status(user_id, trader_id, 'APPROVED', deposit_amount)
 
             welcome_text = (
                 f"🎉 **Congratulations & Welcome aboard!** 🎉\n\n"
@@ -365,12 +433,113 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ Pending Users: `{pending}`\n"
         f"🚫 Blocked Users: `{blocked}`\n\n"
         f"**Available Commands:**\n"
-        f"• `/broadcast <text>` - Send msg to all users\n"
-        f"• `/search <trader_id>` - Find user by ID\n"
+        f"• `/checkinactives` - Kick members inactive for 30 days\n"
+        f"• `/broadcast <text>` - Send msg to all\n"
+        f"• `/signal <asset> <direction> <time>` - Send Trade Signal\n"
+        f"• `/forceapprove <user_id> <trader_id>` - Manual approve\n"
+        f"• `/search <trader_id>` - Find user\n"
         f"• `/block <user_id>` - Ban user\n"
         f"• `/unblock <user_id>` - Unban user"
     )
     await update.message.reply_text(panel_text, parse_mode="Markdown")
+
+async def check_inactives(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+    
+    cursor.execute("SELECT user_id, full_name FROM users WHERE status = 'APPROVED' AND last_active_date < ?", (thirty_days_ago,))
+    inactive_users = cursor.fetchall()
+    
+    kicked_count = 0
+    for uid, name in inactive_users:
+        try:
+            await context.bot.ban_chat_member(chat_id=VIP_GROUP_ID, user_id=uid)
+            await context.bot.unban_chat_member(chat_id=VIP_GROUP_ID, user_id=uid)
+            
+            cursor.execute("UPDATE users SET status = 'KICKED_INACTIVE' WHERE user_id = ?", (uid,))
+            await context.bot.send_message(chat_id=uid, text="⚠️ আপনি টানা ৩০ দিন ধরে নিষ্ক্রিয় (Inactive) থাকায় আপনাকে VIP গ্রুপ থেকে রিমুভ করা হয়েছে।")
+            kicked_count += 1
+        except Exception as e:
+            logging.error(f"Failed to kick user {uid}: {e}")
+
+    conn.commit()
+    conn.close()
+
+    await update.message.reply_text(f"🧹 **Inactive Cleanup Completed!**\n\nটানা ৩০ দিন ট্রেড/অ্যাক্টিভিটি না করায় মোট `{kicked_count}` জন মেম্বারকে VIP গ্রুপ থেকে কিক দেওয়া হয়েছে।")
+
+async def calc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("⚠️ ফরম্যাট: `/calc <Balance> <Risk%>` \nউদাহরণ: `/calc 100 2` (অর্থাৎ $100 ব্যালেন্সের ২% রিস্ক)")
+        return
+    try:
+        balance = float(context.args[0])
+        risk_percent = float(context.args[1])
+        trade_amount = (balance * risk_percent) / 100
+        mtg_amount = trade_amount * 2.2
+
+        res = (
+            f"🧮 **Martingale & Risk Calculator:**\n\n"
+            f"💰 Balance: `${balance}`\n"
+            f"🎯 1st Trade ({risk_percent}%): `${trade_amount:.2f}`\n"
+            f"🔄 1-Step MTG Trade: `${mtg_amount:.2f}`"
+        )
+        await update.message.reply_text(res, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text("❌ সঠিক সংখ্যা লিখুন।")
+
+async def send_signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID or len(context.args) < 3:
+        await update.message.reply_text("⚠️ ফরম্যাট: `/signal <ASSET> <CALL/PUT> <TIME>`\nউদাহরণ: `/signal EUR/USD CALL 5m`")
+        return
+
+    asset = context.args[0].upper()
+    direction = context.args[1].upper()
+    duration = context.args[2]
+
+    arrow = "🟢 CALL (UP)" if direction == "CALL" else "🔴 PUT (DOWN)"
+
+    sig_msg = (
+        f"🚨 **NEW VIP TRADING SIGNAL** 🚨\n\n"
+        f"📊 **Asset:** {asset}\n"
+        f"📈 **Direction:** {arrow}\n"
+        f"⏳ **Duration:** {duration}\n\n"
+        f"⚠️ *Proper Money Management বজায় রেখে ট্রেড প্লেস করুন।*"
+    )
+
+    user_ids = get_all_users()
+    succ = 0
+    for uid in user_ids:
+        try:
+            await context.bot.send_message(chat_id=uid, text=sig_msg, parse_mode="Markdown")
+            succ += 1
+        except Exception:
+            pass
+
+    await update.message.reply_text(f"✅ VIP Signal Broadcasted to `{succ}` users.")
+
+async def force_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID or len(context.args) < 2:
+        await update.message.reply_text("⚠️ ফরম্যাট: `/forceapprove <user_id> <trader_id>`")
+        return
+    
+    uid = int(context.args[0])
+    tid = context.args[1]
+
+    try:
+        invite_link_object = await context.bot.create_chat_invite_link(chat_id=VIP_GROUP_ID, member_limit=1)
+        update_user_status(uid, tid, 'APPROVED', 50)
+        
+        await context.bot.send_message(
+            chat_id=uid,
+            text=f"🎉 **অ্যাডমিন আপনাকে সরাসরি VIP অ্যাক্সেস দিয়েছেন!**\n\n🔗 লিঙ্ক: {invite_link_object.invite_link}"
+        )
+        await update.message.reply_text(f"✅ User `{uid}` successfully approved manually.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
 async def search_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID or not context.args:
@@ -378,12 +547,12 @@ async def search_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = context.args[0]
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, full_name, status FROM users WHERE trader_id = ?", (tid,))
+    cursor.execute("SELECT user_id, username, full_name, deposit_amount, status, last_active_date FROM users WHERE trader_id = ?", (tid,))
     row = cursor.fetchone()
     conn.close()
 
     if row:
-        msg = f"🔍 **User Found:**\n\nTelegram ID: `{row[0]}`\nName: {row[2]}\nUsername: @{row[1]}\nStatus: `{row[3]}`"
+        msg = f"🔍 **User Found:**\n\nTelegram ID: `{row[0]}`\nName: {row[2]}\nUsername: @{row[1]}\nDeposit: `${row[3]}`\nStatus: `{row[4]}`\nLast Active: `{row[5]}`"
     else:
         msg = "❌ কোনো রেকর্ড পাওয়া যায়নি।"
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -425,28 +594,35 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    private_filter = filters.ChatType.PRIVATE
+
     vip_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🚀 Join VIP Group$"), start_vip_join)],
+        entry_points=[MessageHandler(private_filter & filters.Regex("^🚀 Join VIP Group$"), start_vip_join)],
         states={
-            WAITING_FOR_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_trader_id)],
-            WAITING_FOR_SCREENSHOT: [MessageHandler(filters.PHOTO, get_screenshot)],
+            WAITING_FOR_ID: [MessageHandler(private_filter & filters.TEXT & ~filters.COMMAND, get_trader_id)],
+            WAITING_FOR_DEPOSIT: [MessageHandler(private_filter & filters.TEXT & ~filters.COMMAND, get_deposit_amount)],
+            WAITING_FOR_SCREENSHOT: [MessageHandler(private_filter & filters.PHOTO, get_screenshot)],
         },
         fallbacks=[
-            CommandHandler('cancel', cancel),
-            MessageHandler(filters.Regex("^🚀 Join VIP Group$"), start_vip_join)
+            CommandHandler('cancel', cancel, filters=private_filter),
+            MessageHandler(private_filter & filters.Regex("^🚀 Join VIP Group$"), start_vip_join)
         ],
         allow_reentry=True
     )
 
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('admin', admin_panel))
-    app.add_handler(CommandHandler('search', search_user))
-    app.add_handler(CommandHandler('block', block_user_cmd))
-    app.add_handler(CommandHandler('unblock', unblock_user_cmd))
-    app.add_handler(CommandHandler('broadcast', broadcast))
+    app.add_handler(CommandHandler('start', start, filters=private_filter))
+    app.add_handler(CommandHandler('admin', admin_panel, filters=private_filter))
+    app.add_handler(CommandHandler('checkinactives', check_inactives, filters=private_filter))
+    app.add_handler(CommandHandler('calc', calc_command, filters=private_filter))
+    app.add_handler(CommandHandler('signal', send_signal_cmd, filters=private_filter))
+    app.add_handler(CommandHandler('forceapprove', force_approve, filters=private_filter))
+    app.add_handler(CommandHandler('search', search_user, filters=private_filter))
+    app.add_handler(CommandHandler('block', block_user_cmd, filters=private_filter))
+    app.add_handler(CommandHandler('unblock', unblock_user_cmd, filters=private_filter))
+    app.add_handler(CommandHandler('broadcast', broadcast, filters=private_filter))
     
     app.add_handler(vip_conv)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_general_message))
+    app.add_handler(MessageHandler(private_filter & filters.TEXT & ~filters.COMMAND, handle_general_message))
     app.add_handler(CallbackQueryHandler(admin_decision))
 
     print("Master VIP Bot Status: ONLINE and Ready!")
