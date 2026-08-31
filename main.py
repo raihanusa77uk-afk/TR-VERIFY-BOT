@@ -25,7 +25,7 @@ VIP_GROUP_ID = -1004424341978
 REFERRAL_LINK = "https://broker-qx.pro/sign-up/?lid=2321846"
 PUBLIC_CHANNEL_LINK = "https://t.me/tradingwithraihan_22"
 SUPPORT_USERNAME = "@TR_Support_and_Feedback"
-DATABASE_NAME = "clean_vip_bot.db"
+DATABASE_NAME = "fixed_vip_bot.db"
 # =================================================
 
 WAITING_FOR_ID, WAITING_FOR_FEEDBACK = range(2)
@@ -82,7 +82,7 @@ def process_broker_postback(trader_id, deposit_amount):
     conn.close()
     return None
 
-# ================= Automatic Postback Engine =================
+# Automatic Postback Webhook Engine
 class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
     def process_request(self, params):
         trader_id = params.get('trader_id', [None])[0] or params.get('subid', [None])[0] or params.get('uid', [None])[0]
@@ -106,7 +106,6 @@ class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
                         chat_id=VIP_GROUP_ID,
                         member_limit=1
                     )
-                    
                     user_msg = (
                         f"🎉 **স্বয়ংক্রিয় ভেরিফিকেশন সফল!** 🎉\n\n"
                         f"আপনার ডিপোজিট (${deposit_amount}) নিশ্চিত হয়েছে।\n\n"
@@ -114,9 +113,6 @@ class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
                         f"📌 *লিঙ্কটি ১ বার ব্যবহারযোগ্য।*"
                     )
                     await telegram_app.bot.send_message(chat_id=user_id, text=user_msg, parse_mode="Markdown")
-                    
-                    admin_log = f"⚡ **[Auto VIP Approval]**\nUser: `{user_id}` | Trader ID: `{trader_id}` | Deposit: `${deposit_amount}`"
-                    await telegram_app.bot.send_message(chat_id=ADMIN_ID, text=admin_log, parse_mode="Markdown")
                 else:
                     await telegram_app.bot.send_message(
                         chat_id=user_id,
@@ -144,16 +140,39 @@ def start_server():
     server = HTTPServer(('0.0.0.0', port), PostbackHTTPRequestHandler)
     server.serve_forever()
 
-# ================= Telegram UI & Logic =================
+# Buttons Keyboard Setup
+BT_VIP = "🚀 Join VIP Group"
+BT_REG = "🔗 Registration Link"
+BT_PUB = "📢 Public Channel Link"
+BT_FDB = "💬 Send Profit Feedback"
+BT_HLP = "🆘 Help & Support"
+
 def get_clean_keyboard():
     keyboard = [
-        [KeyboardButton("🚀 Join VIP Group"), KeyboardButton("🔗 Registration Link")],
-        [KeyboardButton("📢 Public Channel Link"), KeyboardButton("💬 Send Profit Feedback")],
-        [KeyboardButton("🆘 Help & Support")]
+        [KeyboardButton(BT_VIP), KeyboardButton(BT_REG)],
+        [KeyboardButton(BT_PUB), KeyboardButton(BT_FDB)],
+        [KeyboardButton(BT_HLP)]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-MENU_BUTTONS = ["🚀 Join VIP Group", "🔗 Registration Link", "📢 Public Channel Link", "💬 Send Profit Feedback", "🆘 Help & Support"]
+# Main Message Router
+async def handle_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip() if update.message.text else ""
+
+    if BT_PUB in text or "Public Channel Link" in text:
+        msg = f"📢 **আমাদের অফিশিয়াল পাবলিক টেলিগ্রাম চ্যানেল:**\n\n👉 {PUBLIC_CHANNEL_LINK}"
+        await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+    elif BT_REG in text or "Registration Link" in text:
+        msg = f"📌 **Quotex Official Sign-Up Link:**\n\n👉 {REFERRAL_LINK}\n\n⚠️ *অবশ্যই এই লিংকের মাধ্যমে অ্যাকাউন্ট তৈরি করতে হবে।*"
+        await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+    elif BT_HLP in text or "Help & Support" in text:
+        msg = f"🆘 **যে কোনো সমস্যায় বা সহায়তার জন্য যোগাযোগ করুন:**\n\n👨‍💻 Admin Support: {SUPPORT_USERNAME}"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    else:
+        await update.message.reply_text("নিচের মেনু বাটন ব্যবহার করুন।", reply_markup=get_clean_keyboard())
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -166,7 +185,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# VIP Process
+# VIP Conversation Handler
 async def start_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"🎯 **VIP গ্রুপে যুক্ত হওয়ার নিয়ম:**\n\n"
@@ -181,8 +200,8 @@ async def receive_trader_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = update.effective_user
 
-    if text in MENU_BUTTONS:
-        await handle_clean_menu(update, context)
+    if BT_PUB in text or BT_REG in text or BT_HLP in text or BT_FDB in text:
+        await handle_all_messages(update, context)
         return ConversationHandler.END
 
     if not text.isdigit() or len(text) != 8:
@@ -190,15 +209,14 @@ async def receive_trader_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAITING_FOR_ID
 
     set_trader_id(user.id, text)
-
     reply_msg = (
         f"✅ **Trader ID ({text}) সেভ করা হয়েছে!**\n\n"
-        f"⏳ ব্রোকারে আপনার ডিপোজিট সম্পন্ন হওয়া মাত্রই অটোমেটিক পোস্টব্যাকের মাধ্যমে বট আপনাকে এই চ্যাটে VIP লিঙ্ক পাঠিয়ে দেবে।"
+        f"⏳ ব্রোকারে আপনার ডিপোজিট সম্পন্ন হওয়া মাত্রই অটোমেটিক পোস্টব্যাকের মাধ্যমে বট আপনাকে এই চ্যাটে VIP লিঙ্ক বানিয়ে পাঠিয়ে দেবে।"
     )
     await update.message.reply_text(reply_msg, parse_mode="Markdown", reply_markup=get_clean_keyboard())
     return ConversationHandler.END
 
-# Feedback Process
+# Feedback Conversation Handler
 async def start_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💬 **আপনার প্রফিটের ফিডব্যাক, স্ক্রিনশট বা মেসেজটি লিখুন:**\n\n(এডমিন সরাসরি এটি দেখতে পাবেন)")
     return WAITING_FOR_FEEDBACK
@@ -207,8 +225,8 @@ async def receive_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip() if update.message.text else ""
 
-    if text in MENU_BUTTONS:
-        await handle_clean_menu(update, context)
+    if BT_PUB in text or BT_REG in text or BT_HLP in text:
+        await handle_all_messages(update, context)
         return ConversationHandler.END
 
     username_str = f"@{user.username}" if user.username else "No Username"
@@ -222,25 +240,6 @@ async def receive_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ আপনার ফিডব্যাক সফলভাবে এডমিনের কাছে পাঠানো হয়েছে। ধন্যবাদ!", reply_markup=get_clean_keyboard())
     return ConversationHandler.END
 
-# Menu Buttons Handler
-async def handle_clean_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-
-    if text == "🔗 Registration Link":
-        msg = f"📌 **Quotex Official Sign-Up Link:**\n\n👉 {REFERRAL_LINK}\n\n⚠️ *অবশ্যই এই লিংকের মাধ্যমে অ্যাকাউন্ট তৈরি করতে হবে।*"
-        await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
-
-    elif text == "📢 Public Channel Link":
-        msg = f"📢 **আমাদের অফিশিয়াল পাবলিক টেলিগ্রাম চ্যানেল:**\n\n👉 {PUBLIC_CHANNEL_LINK}"
-        await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
-
-    elif text == "🆘 Help & Support":
-        msg = f"🆘 **যে কোনো সমস্যায় বা সহায়তার জন্য যোগাযোগ করুন:**\n\n👨‍💻 Admin Support: {SUPPORT_USERNAME}"
-        await update.message.reply_text(msg, parse_mode="Markdown")
-
-    else:
-        await update.message.reply_text("নিচের মেনু বাটন ব্যবহার করুন।", reply_markup=get_clean_keyboard())
-
 def main():
     global telegram_app
     threading.Thread(target=start_server, daemon=True).start()
@@ -251,7 +250,7 @@ def main():
     private_filter = filters.ChatType.PRIVATE
 
     vip_conv = ConversationHandler(
-        entry_points=[MessageHandler(private_filter & filters.Regex("^🚀 Join VIP Group$"), start_vip)],
+        entry_points=[MessageHandler(private_filter & filters.TEXT & filters.Regex(".*VIP Group.*"), start_vip)],
         states={
             WAITING_FOR_ID: [MessageHandler(private_filter & filters.TEXT & ~filters.COMMAND, receive_trader_id)]
         },
@@ -260,7 +259,7 @@ def main():
     )
 
     feedback_conv = ConversationHandler(
-        entry_points=[MessageHandler(private_filter & filters.Regex("^💬 Send Profit Feedback$"), start_feedback)],
+        entry_points=[MessageHandler(private_filter & filters.TEXT & filters.Regex(".*Feedback.*"), start_feedback)],
         states={
             WAITING_FOR_FEEDBACK: [MessageHandler(private_filter & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, receive_feedback)]
         },
@@ -271,9 +270,9 @@ def main():
     app.add_handler(CommandHandler("start", start, filters=private_filter))
     app.add_handler(vip_conv)
     app.add_handler(feedback_conv)
-    app.add_handler(MessageHandler(private_filter & filters.TEXT & ~filters.COMMAND, handle_clean_menu))
+    app.add_handler(MessageHandler(private_filter & filters.TEXT & ~filters.COMMAND, handle_all_messages))
 
-    print("Clean VIP Bot with 5 Key Features: ONLINE!")
+    print("Bot fixed and online!")
     app.run_polling()
 
 if __name__ == '__main__':
