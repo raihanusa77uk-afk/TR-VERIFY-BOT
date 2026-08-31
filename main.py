@@ -4,6 +4,7 @@ import os
 import threading
 import random
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -20,7 +21,7 @@ from telegram.ext import (
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ================= Configuration =================
-BOT_TOKEN = "8295039946:AAE26ZDNRPp8dJ2In-iXKJPuDKTBm7_xv0M"
+BOT_TOKEN = "8295039946:AAFgJ9yLjbLV69EN5HRjOW17_kmaYr8c82w"
 ADMIN_ID = 7047896730
 VIP_GROUP_ID = -1004424341978
 
@@ -51,16 +52,8 @@ QUIZ_QUESTIONS = [
     }
 ]
 
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Ultimate All-In-One VIP Bot: ONLINE")
-
-def run_dummy_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    server.serve_forever()
+# Global bot application reference
+telegram_app = None
 
 # Database Setup
 def init_db():
@@ -144,6 +137,14 @@ def update_user_status(user_id, trader_id, status, deposit_amount=0):
     conn.commit()
     conn.close()
 
+def get_user_by_trader_id(trader_id):
+    conn = sqlite3.connect(DATABASE_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, status FROM users WHERE trader_id = ?", (trader_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row
+
 def log_trade_pnl(user_id, pnl_amount):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
@@ -205,6 +206,106 @@ def get_all_users():
     conn.close()
     return [row[0] for row in rows]
 
+# ================= Quotex Postback Webhook Server =================
+class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
+    def process_postback(self, params):
+        # Extract Trader ID from Quotex fields
+        trader_id = params.get('trader_id', [None])[0] or params.get('uid', [None])[0] or params.get('subid', [None])[0] or params.get('click_id', [None])[0]
+        deposit_amount = params.get('sumdep', [0])[0] or params.get('deposit', [0])[0] or params.get('amount', [0])[0]
+        status = params.get('status', ['APPROVED'])[0].upper()
+
+        if not trader_id:
+            return "Missing trader_id", 400
+
+        try:
+            deposit_amount = float(deposit_amount)
+        except ValueError:
+            deposit_amount = 0.0
+
+        user_info = get_user_by_trader_id(trader_id)
+        
+        if user_info:
+            user_id, current_status = user_info
+            update_user_status(user_id, trader_id, status, deposit_amount)
+
+            # Auto-Approve & Send VIP Link via Telegram
+            if status == 'APPROVED' and telegram_app:
+                try:
+                    loop = telegram_app.loop
+                    async def auto_approve_user():
+                        invite_link_object = await telegram_app.bot.create_chat_invite_link(
+                            chat_id=VIP_GROUP_ID,
+                            member_limit=1,
+                            name=f"Auto Postback Access for {user_id}"
+                        )
+                        single_use_link = invite_link_object.invite_link
+                        
+                        welcome_text = (
+                            f"🎉 **Quotex Postback Verified!** 🎉\n\n"
+                            f"আপনার Trader ID (`{trader_id}`) সফলভাবে অটোমেটিক ভেরিফাই হয়েছে।\n"
+                            f"💰 **Deposit:** `${deposit_amount}`\n\n"
+                            f"🔗 **আপনার VIP Access Link:**\n👉 {single_use_link}\n\n"
+                            f"📌 *এই লিঙ্কটি ১ বার ব্যবহারযোগ্য।*"
+                        )
+                        await telegram_app.bot.send_message(chat_id=user_id, text=welcome_text, parse_mode="Markdown")
+                        await telegram_app.bot.send_message(
+                            chat_id=ADMIN_ID,
+                            text=f"⚡ **Quotex Postback Live:**\nUser `{user_id}` (Trader ID: `{trader_id}`) Verified & Sent VIP Link!"
+                        )
+
+                    loop.create_task(auto_approve_user())
+                except Exception as e:
+                    logging.error(f"Postback Auto-Approval Error: {e}")
+            
+            return f"Postback Processed for Trader ID {trader_id}", 200
+        else:
+            # Unmatched Trader ID Alert to Admin
+            if telegram_app:
+                loop = telegram_app.loop
+                async def notify_admin_unmatched():
+                    await telegram_app.bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"📥 **Unmatched Quotex Postback Received:**\nTrader ID: `{trader_id}`\nDeposit: `${deposit_amount}`\nStatus: `{status}`"
+                    )
+                loop.create_task(notify_admin_unmatched())
+            return "Postback logged successfully", 200
+
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == "/postback":
+            params = parse_qs(parsed_path.query)
+            msg, code = self.process_postback(params)
+            self.send_response(code)
+            self.end_headers()
+            self.wfile.write(msg.encode())
+        else:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Quotex VIP Bot Postback Webhook: ACTIVE")
+
+    def do_POST(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == "/postback":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            params = parse_qs(post_data)
+            
+            if not params:
+                params = parse_qs(parsed_path.query)
+                
+            msg, code = self.process_postback(params)
+            self.send_response(code)
+            self.end_headers()
+            self.wfile.write(msg.encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), PostbackHTTPRequestHandler)
+    server.serve_forever()
+
 async def check_channel_membership(user_id, context: ContextTypes.DEFAULT_TYPE):
     try:
         member = await context.bot.get_chat_member(chat_id=MUST_JOIN_CHANNEL, user_id=user_id)
@@ -212,7 +313,7 @@ async def check_channel_membership(user_id, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         return False
 
-# Comprehensive All-In-One Dynamic Keyboard Menu
+# Keyboard Menu
 def get_main_menu_keyboard():
     keyboard = [
         [KeyboardButton("🚀 Join VIP Group"), KeyboardButton("🔗 Registration Link")],
@@ -260,7 +361,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_msg = (
         f"👋 **হ্যালো {user.first_name}!**\n\n"
         f"স্বাগতম **Ultimate All-In-One Trading Hub**-এ! 📈🔥\n\n"
-        f"এখানে আপনি VIP জয়েনিং, লাইভ মার্কেট এনালাইসিস, এআই সিগন্যাল, কম্পাউন্ডিং প্ল্যান, ট্রেডিং ক্যালকুলেটর ও জার্নাল সব এক জায়গায় পাবেন।"
+        f"এখানে আপনি VIP জয়েনিং, লাইভ মার্কেট এনালাইসিস, এআই সিগন্যাল, পোস্টব্যাক অটো-ভেরিফিকেশন, কম্পাউন্ডিং প্ল্যান ও ট্রেডিং জার্নাল সব এক জায়গায় পাবেন।"
     )
     await update.message.reply_text(welcome_msg, parse_mode="Markdown", reply_markup=get_main_menu_keyboard())
     return ConversationHandler.END
@@ -373,7 +474,7 @@ async def get_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user_status(user.id, trader_id, 'PENDING', deposit_amount)
 
     await update.message.reply_text(
-        "✅ আপনার ভেরিফিকেশন আবেদন অ্যাডমিনের কাছে জমা হয়েছে। যাচাইকরণের পর আপনাকে লিঙ্ক জানিয়ে দেওয়া হবে।",
+        "✅ আপনার ভেরিফিকেশন আবেদন জমা হয়েছে। ব্রোকার Postback দিয়ে অটো-ভেরিফাই বা অ্যাডমিন ম্যানুয়ালি যাচাই করার সাথে সাথে লিংক পেয়ে যাবেন।",
         reply_markup=get_main_menu_keyboard()
     )
     return ConversationHandler.END
@@ -601,7 +702,7 @@ async def target_calc_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = float(context.args[0])
         target_pct = float(context.args[1])
         target_amt = (balance * target_pct) / 100
-        stop_loss = target_amt # Equal SL and TP rule
+        stop_loss = target_amt
 
         msg = (
             f"🎯 **Daily Target & Stop-Loss Plan:**\n\n"
@@ -859,9 +960,14 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------- Execution -----------------
 def main():
+    global telegram_app
+
+    # Start HTTP & Postback Listener
     threading.Thread(target=run_dummy_server, daemon=True).start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    telegram_app = app
+    
     private_filter = filters.ChatType.PRIVATE
 
     vip_conv = ConversationHandler(
@@ -910,7 +1016,7 @@ def main():
     app.add_handler(MessageHandler(private_filter & filters.TEXT & ~filters.COMMAND, handle_general_message))
     app.add_handler(CallbackQueryHandler(admin_decision))
 
-    print("Ultimate All-In-One VIP Bot Status: ONLINE & READY!")
+    print("Ultimate All-In-One VIP Bot with Auto-Postback: ONLINE & READY!")
     app.run_polling()
 
 if __name__ == '__main__':
