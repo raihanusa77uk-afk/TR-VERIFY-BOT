@@ -2,20 +2,13 @@ import logging
 import sqlite3
 import os
 import threading
-import io
-import requests
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     ConversationHandler,
     filters,
@@ -30,16 +23,15 @@ ADMIN_ID = 7047896730
 VIP_GROUP_ID = -1004424341978
 
 REFERRAL_LINK = "https://broker-qx.pro/sign-up/?lid=2321846"
-MUST_JOIN_CHANNEL = "@tradingwithraihan_22"
+PUBLIC_CHANNEL_LINK = "https://t.me/tradingwithraihan_22"
 SUPPORT_USERNAME = "@TR_Support_and_Feedback"
-DATABASE_NAME = "ultimate_master_bot.db"
+DATABASE_NAME = "clean_vip_bot.db"
 # =================================================
 
-WAITING_FOR_ID, WAITING_FOR_DEPOSIT, WAITING_FOR_SCREENSHOT, WAITING_FOR_PNL = range(4)
-
+WAITING_FOR_ID, WAITING_FOR_FEEDBACK = range(2)
 telegram_app = None
 
-# Database Initialization
+# Database Setup
 def init_db():
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
@@ -50,21 +42,8 @@ def init_db():
             full_name TEXT,
             trader_id TEXT UNIQUE,
             deposit_amount REAL DEFAULT 0,
-            vip_level TEXT DEFAULT 'NONE',
             status TEXT DEFAULT 'PENDING',
-            is_blocked INTEGER DEFAULT 0,
-            last_active_date TEXT,
-            total_trades INTEGER DEFAULT 0,
-            total_profit REAL DEFAULT 0,
-            win_trades INTEGER DEFAULT 0,
-            reward_points INTEGER DEFAULT 0,
             joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS used_trader_ids (
-            trader_id TEXT PRIMARY KEY,
-            user_id INTEGER
         )
     ''')
     conn.commit()
@@ -72,73 +51,42 @@ def init_db():
 
 init_db()
 
-# DB Helpers
 def save_user(user_id, username, full_name):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, username, full_name, last_active_date) VALUES (?, ?, ?, ?)", 
-                   (user_id, username, full_name, today_str))
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, username, full_name) VALUES (?, ?, ?)", 
+                   (user_id, username, full_name))
     conn.commit()
     conn.close()
 
-def update_activity(user_id):
+def set_trader_id(user_id, trader_id):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    cursor.execute("UPDATE users SET last_active_date = ? WHERE user_id = ?", (today_str, user_id))
+    cursor.execute("UPDATE users SET trader_id = ? WHERE user_id = ?", (trader_id, user_id))
     conn.commit()
     conn.close()
 
-def is_user_blocked(user_id):
-    if user_id == ADMIN_ID:
-        return False
+def process_broker_postback(trader_id, deposit_amount):
     conn = sqlite3.connect(DATABASE_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT is_blocked FROM users WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] == 1 if row else False
-
-def get_vip_level(deposit):
-    if deposit >= 500:
-        return "💎 Diamond VIP"
-    elif deposit >= 200:
-        return "🥇 Gold VIP"
-    elif deposit >= 50:
-        return "🥈 Silver VIP"
-    return "🥉 Basic Member"
-
-def update_user_status_postback(trader_id, status, deposit_amount=0):
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    vip_tier = get_vip_level(deposit_amount)
-    earned_points = int(deposit_amount / 2)
-    
     cursor.execute("SELECT user_id FROM users WHERE trader_id = ?", (trader_id,))
     row = cursor.fetchone()
     
     if row:
         user_id = row[0]
-        cursor.execute("""UPDATE users SET status = ?, deposit_amount = deposit_amount + ?, 
-                       vip_level = ?, reward_points = reward_points + ?, last_active_date = ? 
-                       WHERE trader_id = ?""", 
-                       (status, deposit_amount, vip_tier, earned_points, today_str, trader_id))
-        if status == 'APPROVED':
-            cursor.execute("INSERT OR REPLACE INTO used_trader_ids (trader_id, user_id) VALUES (?, ?)", (trader_id, user_id))
+        cursor.execute("UPDATE users SET deposit_amount = deposit_amount + ?, status = 'APPROVED' WHERE trader_id = ?", 
+                       (deposit_amount, trader_id))
         conn.commit()
         conn.close()
         return user_id
     conn.close()
     return None
 
-# ================= 1. REAL POSTBACK WEBHOOK =================
+# ================= Automatic Postback Engine =================
 class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
-    def process_postback(self, params):
-        trader_id = params.get('trader_id', [None])[0] or params.get('subid', [None])[0]
+    def process_request(self, params):
+        trader_id = params.get('trader_id', [None])[0] or params.get('subid', [None])[0] or params.get('uid', [None])[0]
         deposit_amount = params.get('sumdep', [0])[0] or params.get('deposit', [0])[0]
-        status = params.get('status', ['APPROVED'])[0].upper()
 
         if not trader_id:
             return "Missing trader_id", 400
@@ -148,41 +96,41 @@ class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             deposit_amount = 0.0
 
-        user_id = update_user_status_postback(trader_id, status, deposit_amount)
-        
-        if user_id and telegram_app:
-            try:
-                loop = telegram_app.loop
-                async def auto_approve_user():
-                    if deposit_amount >= 50 and status == 'APPROVED':
-                        invite_link_object = await telegram_app.bot.create_chat_invite_link(
-                            chat_id=VIP_GROUP_ID, member_limit=1
-                        )
-                        single_use_link = invite_link_object.invite_link
-                        welcome_text = (
-                            f"⚡ **Quotex Real Postback Auto-Verified!** ⚡\n\n"
-                            f"🆔 Trader ID: `{trader_id}`\n"
-                            f"💰 Deposit: `${deposit_amount}`\n"
-                            f"🏷️ Tier: `{get_vip_level(deposit_amount)}`\n\n"
-                            f"🔗 **আপনার ১-টাইম VIP Link:**\n👉 {single_use_link}"
-                        )
-                        await telegram_app.bot.send_message(chat_id=user_id, text=welcome_text, parse_mode="Markdown")
-                    else:
-                        await telegram_app.bot.send_message(
-                            chat_id=user_id,
-                            text=f"📥 **Postback Recieved:** deposit ${deposit_amount} - minimum $50 required."
-                        )
+        user_id = process_broker_postback(trader_id, deposit_amount)
 
-                loop.create_task(auto_approve_user())
-            except Exception as e:
-                logging.error(f"Postback Error: {e}")
+        if user_id and telegram_app:
+            loop = telegram_app.loop
+            async def send_vip_access():
+                if deposit_amount >= 50:
+                    invite = await telegram_app.bot.create_chat_invite_link(
+                        chat_id=VIP_GROUP_ID,
+                        member_limit=1
+                    )
+                    
+                    user_msg = (
+                        f"🎉 **স্বয়ংক্রিয় ভেরিফিকেশন সফল!** 🎉\n\n"
+                        f"আপনার ডিপোজিট (${deposit_amount}) নিশ্চিত হয়েছে।\n\n"
+                        f"🔗 **VIP Group Invite Link:**\n👉 {invite.invite_link}\n\n"
+                        f"📌 *লিঙ্কটি ১ বার ব্যবহারযোগ্য।*"
+                    )
+                    await telegram_app.bot.send_message(chat_id=user_id, text=user_msg, parse_mode="Markdown")
+                    
+                    admin_log = f"⚡ **[Auto VIP Approval]**\nUser: `{user_id}` | Trader ID: `{trader_id}` | Deposit: `${deposit_amount}`"
+                    await telegram_app.bot.send_message(chat_id=ADMIN_ID, text=admin_log, parse_mode="Markdown")
+                else:
+                    await telegram_app.bot.send_message(
+                        chat_id=user_id,
+                        text=f"📥 পোস্টব্যাক ডিপোজিট এসেছে `${deposit_amount}`, কিন্তু VIP-র জন্য নূন্যতম $50 প্রয়োজন।"
+                    )
+
+            loop.create_task(send_vip_access())
             return "OK", 200
         return "Logged", 200
 
     def do_GET(self):
-        parsed_path = urlparse(self.path)
-        if parsed_path.path == "/postback":
-            msg, code = self.process_postback(parse_qs(parsed_path.query))
+        parsed = urlparse(self.path)
+        if parsed.path == "/postback":
+            msg, code = self.process_request(parse_qs(parsed.query))
             self.send_response(code)
             self.end_headers()
             self.wfile.write(msg.encode())
@@ -191,167 +139,141 @@ class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"Server Active")
 
-def run_dummy_server():
+def start_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), PostbackHTTPRequestHandler)
     server.serve_forever()
 
-# ================= 2. REAL RSI SIGNAL CALCULATOR =================
-def calculate_real_rsi_signal():
-    # রিয়েল প্রাইস অ্যানালিসিস লজিক
-    # ধরে নেওয়া যাক সাম্প্রতিক ১০টি ক্যান্ডেলের পরিবর্তন দিয়ে RSI ক্যালকুলেশন হচ্ছে
-    import random
-    prices = [random.uniform(1.0800, 1.0900) for _ in range(14)]
-    gains = [max(0, prices[i] - prices[i-1]) for i in range(1, len(prices))]
-    losses = [max(0, prices[i-1] - prices[i]) for i in range(1, len(prices))]
-    
-    avg_gain = sum(gains) / len(gains)
-    avg_loss = sum(losses) / len(losses) if sum(losses) > 0 else 1
-    
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    
-    if rsi >= 65:
-        signal = "🔴 PUT (DOWN)"
-        reason = "RSI Overbought Area"
-    elif rsi <= 35:
-        signal = "🟢 CALL (UP)"
-        reason = "RSI Oversold Area"
-    else:
-        signal = "🟡 WAIT / NEUTRAL"
-        reason = "RSI Range Bound Zone"
-        
-    return rsi, signal, reason
-
-# ================= 3. REAL LIVE NEWS API =================
-def fetch_real_forex_news():
-    try:
-        url = "https://napi.forexfactory.com/calendar/month"
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            high_impact = [item for item in data if item.get('impact') == 'High'][:3]
-            if high_impact:
-                msg = "🌐 **Real-Time Live High Impact News:**\n\n"
-                for news in high_impact:
-                    msg += f"• 🔴 **{news.get('country')} ({news.get('title')})**\n  ⏰ Time: {news.get('date')}\n\n"
-                return msg
-    except Exception:
-        pass
-    return "🌐 **Live Market News:**\n⚠️ আজ কোনো বড় High Impact News রিপোর্ট নেই।"
-
-# Keyboards
-def get_main_menu_keyboard():
+# ================= Telegram UI & Logic =================
+def get_clean_keyboard():
     keyboard = [
         [KeyboardButton("🚀 Join VIP Group"), KeyboardButton("🔗 Registration Link")],
-        [KeyboardButton("📈 Real Technical Signal"), KeyboardButton("🎯 Target Calculator")],
-        [KeyboardButton("📊 My Real Profile"), KeyboardButton("🏆 Real Leaderboard")],
-        [KeyboardButton("📝 Log Trade (Real PnL)"), KeyboardButton("📊 Dynamic Graph Chart")],
-        [KeyboardButton("🌐 Live Economic News"), KeyboardButton("🧠 Psychology Rules")]
+        [KeyboardButton("📢 Public Channel Link"), KeyboardButton("💬 Send Profit Feedback")],
+        [KeyboardButton("🆘 Help & Support")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-MENU_BUTTONS = ["🚀 Join VIP Group", "🔗 Registration Link", "📈 Real Technical Signal", "🎯 Target Calculator", 
-                "📊 My Real Profile", "🏆 Real Leaderboard", "📝 Log Trade (Real PnL)", "📊 Dynamic Graph Chart", 
-                "🌐 Live Economic News", "🧠 Psychology Rules"]
+MENU_BUTTONS = ["🚀 Join VIP Group", "🔗 Registration Link", "📢 Public Channel Link", "💬 Send Profit Feedback", "🆘 Help & Support"]
 
-# ================= Handlers =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if is_user_blocked(user.id):
-        return
     save_user(user.id, user.username, user.full_name)
-    update_activity(user.id)
-    await update.message.reply_text("👋 স্বাগতম **100% Real Functional Trading Hub**-এ। নিচের বাটন চেপে রিয়েল ফিচারগুলো ব্যবহার করুন:", reply_markup=get_main_menu_keyboard())
+    await update.message.reply_text(
+        f"👋 **হ্যালো {user.first_name}!**\n\n"
+        f"স্বাগতম **TRADING BY RAIHAN** অফিসিয়াল বটে। নিচের মেনু থেকে আপনার প্রয়োজনীয় অপশনটি বেছে নিন:",
+        parse_mode="Markdown",
+        reply_markup=get_clean_keyboard()
+    )
+    return ConversationHandler.END
 
-# Dynamic Real Graph Generator
-async def chart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    conn = sqlite3.connect(DATABASE_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT total_trades, win_trades, total_profit FROM users WHERE user_id = ?", (user.id,))
-    row = cursor.fetchone()
-    conn.close()
+# VIP Process
+async def start_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        f"🎯 **VIP গ্রুপে যুক্ত হওয়ার নিয়ম:**\n\n"
+        f"1️⃣ নিচের অফিশিয়াল লিঙ্ক দিয়ে অ্যাকাউন্ট খুলুন:\n👉 {REFERRAL_LINK}\n\n"
+        f"2️⃣ অ্যাকাউন্টে সর্বনিম্ন **$50** ডিপোজিট করুন।\n\n"
+        f"3️⃣ এবার আপনার **8-digit Quotex Trader ID** টি নিচে লিখে পাঠান:"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+    return WAITING_FOR_ID
 
-    if not row or row[0] == 0:
-        await update.message.reply_text("❌ চার্ট তৈরি করার মতো আপনার কোনো ট্রেড হিস্ট্রি নেই। আগে '📝 Log Trade' করে তথ্য দিন।")
-        return
-
-    trades, wins, profit = row
-    losses = trades - wins
-
-    # Matplotlib Graph Generation
-    fig, ax = plt.subplots(figsize=(5, 4))
-    ax.pie([wins, losses], labels=[f'Win ({wins})', f'Loss ({losses})'], colors=['#2ecc71', '#e74c3c'], autopct='%1.1f%%', startangle=90)
-    fig.patch.set_facecolor('#1e272e')
-    ax.set_title(f"User {user.first_name} Trading Stats", color='white')
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', facecolor=fig.get_facecolor())
-    buf.seek(0)
-    plt.close(fig)
-
-    await context.bot.send_photo(chat_id=user.id, photo=buf, caption=f"📊 **Real Matplotlib Generated Chart**\n💰 Total Profit: `${profit:.2f}`\n📈 Total Trades: `{trades}`", parse_mode="Markdown")
-
-async def handle_general_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+async def receive_trader_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    update_activity(user.id)
+    user = update.effective_user
 
-    if text == "📈 Real Technical Signal":
-        rsi_val, sig, reason = calculate_real_rsi_signal()
-        msg = (
-            f"📈 **Real-Time Mathematical Signal:**\n\n"
-            f"📊 Indicator: **RSI (14)**\n"
-            f"🔢 Calculated Value: `{rsi_val:.2f}`\n"
-            f"🎯 Signal: **{sig}**\n"
-            f"💡 Reason: `{reason}`"
-        )
-        await update.message.reply_text(msg, parse_mode="Markdown")
+    if text in MENU_BUTTONS:
+        await handle_clean_menu(update, context)
+        return ConversationHandler.END
 
-    elif text == "🌐 Live Economic News":
-        news = fetch_real_forex_news()
-        await update.message.reply_text(news, parse_mode="Markdown")
+    if not text.isdigit() or len(text) != 8:
+        await update.message.reply_text("❌ অকার্যকর ID! সঠিক ৮-ডিজিটের Trader ID লিখুন (যেমন: 46123489):")
+        return WAITING_FOR_ID
 
-    elif text == "📊 Dynamic Graph Chart":
-        await chart_cmd(update, context)
+    set_trader_id(user.id, text)
 
-    elif text == "📊 My Real Profile":
-        conn = sqlite3.connect(DATABASE_NAME)
-        cursor = conn.cursor()
-        cursor.execute("SELECT trader_id, deposit_amount, status, total_profit, total_trades, win_trades, vip_level FROM users WHERE user_id = ?", (user.id,))
-        row = cursor.fetchone()
-        conn.close()
+    reply_msg = (
+        f"✅ **Trader ID ({text}) সেভ করা হয়েছে!**\n\n"
+        f"⏳ ব্রোকারে আপনার ডিপোজিট সম্পন্ন হওয়া মাত্রই অটোমেটিক পোস্টব্যাকের মাধ্যমে বট আপনাকে এই চ্যাটে VIP লিঙ্ক পাঠিয়ে দেবে।"
+    )
+    await update.message.reply_text(reply_msg, parse_mode="Markdown", reply_markup=get_clean_keyboard())
+    return ConversationHandler.END
 
-        if row:
-            msg = (
-                f"👤 **Real Database Profile:**\n\n"
-                f"🆔 Trader ID: `{row[0] or 'Not Set'}`\n"
-                f"🏷️ Tier: `{row[6]}`\n"
-                f"💵 Verified Deposit: `${row[1]}`\n"
-                f"📈 Total Trades: `{row[4]}`\n"
-                f"💰 Realized Profit: `${row[3]:.2f}`\n"
-                f"📌 VIP Status: `{row[2]}`"
-            )
-        else:
-            msg = "❌ ডাটাবেজে কোনো রেকর্ড পাওয়া যায়নি।"
+# Feedback Process
+async def start_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("💬 **আপনার প্রফিটের ফিডব্যাক, স্ক্রিনশট বা মেসেজটি লিখুন:**\n\n(এডমিন সরাসরি এটি দেখতে পাবেন)")
+    return WAITING_FOR_FEEDBACK
+
+async def receive_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text.strip() if update.message.text else ""
+
+    if text in MENU_BUTTONS:
+        await handle_clean_menu(update, context)
+        return ConversationHandler.END
+
+    username_str = f"@{user.username}" if user.username else "No Username"
+    admin_msg = f"📩 **New User Feedback!**\n\n👤 **From:** {user.full_name} ({username_str})\n🆔 **User ID:** `{user.id}`\n\n💬 **Message:**\n{text}"
+
+    if update.message.photo:
+        await context.bot.send_photo(chat_id=ADMIN_ID, photo=update.message.photo[-1].file_id, caption=admin_msg, parse_mode="Markdown")
+    else:
+        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, parse_mode="Markdown")
+
+    await update.message.reply_text("✅ আপনার ফিডব্যাক সফলভাবে এডমিনের কাছে পাঠানো হয়েছে। ধন্যবাদ!", reply_markup=get_clean_keyboard())
+    return ConversationHandler.END
+
+# Menu Buttons Handler
+async def handle_clean_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if text == "🔗 Registration Link":
+        msg = f"📌 **Quotex Official Sign-Up Link:**\n\n👉 {REFERRAL_LINK}\n\n⚠️ *অবশ্যই এই লিংকের মাধ্যমে অ্যাকাউন্ট তৈরি করতে হবে।*"
+        await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+    elif text == "📢 Public Channel Link":
+        msg = f"📢 **আমাদের অফিশিয়াল পাবলিক টেলিগ্রাম চ্যানেল:**\n\n👉 {PUBLIC_CHANNEL_LINK}"
+        await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
+
+    elif text == "🆘 Help & Support":
+        msg = f"🆘 **যে কোনো সমস্যায় বা সহায়তার জন্য যোগাযোগ করুন:**\n\n👨‍💻 Admin Support: {SUPPORT_USERNAME}"
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     else:
-        await update.message.reply_text("নিচের বাটন সিলেক্ট করুন।", reply_markup=get_main_menu_keyboard())
+        await update.message.reply_text("নিচের মেনু বাটন ব্যবহার করুন।", reply_markup=get_clean_keyboard())
 
-# Execution
 def main():
     global telegram_app
-    threading.Thread(target=run_dummy_server, daemon=True).start()
+    threading.Thread(target=start_server, daemon=True).start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     telegram_app = app
 
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_general_message))
+    private_filter = filters.ChatType.PRIVATE
 
-    print("Real Engine Bot Started!")
+    vip_conv = ConversationHandler(
+        entry_points=[MessageHandler(private_filter & filters.Regex("^🚀 Join VIP Group$"), start_vip)],
+        states={
+            WAITING_FOR_ID: [MessageHandler(private_filter & filters.TEXT & ~filters.COMMAND, receive_trader_id)]
+        },
+        fallbacks=[],
+        allow_reentry=True
+    )
+
+    feedback_conv = ConversationHandler(
+        entry_points=[MessageHandler(private_filter & filters.Regex("^💬 Send Profit Feedback$"), start_feedback)],
+        states={
+            WAITING_FOR_FEEDBACK: [MessageHandler(private_filter & (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, receive_feedback)]
+        },
+        fallbacks=[],
+        allow_reentry=True
+    )
+
+    app.add_handler(CommandHandler("start", start, filters=private_filter))
+    app.add_handler(vip_conv)
+    app.add_handler(feedback_conv)
+    app.add_handler(MessageHandler(private_filter & filters.TEXT & ~filters.COMMAND, handle_clean_menu))
+
+    print("Clean VIP Bot with 5 Key Features: ONLINE!")
     app.run_polling()
 
 if __name__ == '__main__':
