@@ -21,7 +21,7 @@ from telegram.ext import (
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ================= Configuration =================
-BOT_TOKEN = "8295039946:AAFgJ9yLjbLV69EN5HRjOW17_kmaYr8c82w"
+BOT_TOKEN = "8295039946:AAF9Tz23T5vsm0RRS5VVb_c46Ydt8m7-Otc"
 ADMIN_ID = 7047896730
 VIP_GROUP_ID = -1004424341978
 
@@ -209,7 +209,6 @@ def get_all_users():
 # ================= Quotex Postback Webhook Server =================
 class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
     def process_postback(self, params):
-        # Extract Trader ID from Quotex fields
         trader_id = params.get('trader_id', [None])[0] or params.get('uid', [None])[0] or params.get('subid', [None])[0] or params.get('click_id', [None])[0]
         deposit_amount = params.get('sumdep', [0])[0] or params.get('deposit', [0])[0] or params.get('amount', [0])[0]
         status = params.get('status', ['APPROVED'])[0].upper()
@@ -228,7 +227,6 @@ class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
             user_id, current_status = user_info
             update_user_status(user_id, trader_id, status, deposit_amount)
 
-            # Auto-Approve & Send VIP Link via Telegram
             if status == 'APPROVED' and telegram_app:
                 try:
                     loop = telegram_app.loop
@@ -259,7 +257,6 @@ class PostbackHTTPRequestHandler(BaseHTTPRequestHandler):
             
             return f"Postback Processed for Trader ID {trader_id}", 200
         else:
-            # Unmatched Trader ID Alert to Admin
             if telegram_app:
                 loop = telegram_app.loop
                 async def notify_admin_unmatched():
