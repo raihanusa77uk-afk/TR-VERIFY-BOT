@@ -20,7 +20,7 @@ from telegram.ext import (
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ================= Configuration =================
-BOT_TOKEN = "8295039946:AAFgJ9yLjbLV69EN5HRjOW17_kmaYr8c82w"
+BOT_TOKEN = "8295039946:AAE26ZDNRPp8dJ2In-iXKJPuDKTBm7_xv0M"
 ADMIN_ID = 7047896730
 VIP_GROUP_ID = -1004424341978
 
